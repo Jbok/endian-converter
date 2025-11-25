@@ -498,13 +498,18 @@ def get_header_path_for_struct(missing_struct: str, base_path: Path, cache: Dict
     print(f"\n구조체 '{missing_struct}'를 찾을 수 없습니다.")
     print(f"이 구조체가 정의된 헤더 파일의 경로를 입력해주세요.")
     print(f"(현재 디렉토리 기준: {base_path.absolute()})")
+    print(f"스킵하려면 'skip'을 입력하세요.")
     
     while True:
         try:
-            header_input = input("헤더 파일 경로: ").strip()
+            header_input = input("헤더 파일 경로 (또는 'skip'): ").strip()
             if not header_input:
                 print("경로를 입력해주세요.")
                 continue
+            
+            # skip 명령어 처리
+            if header_input.lower() == 'skip':
+                return None, []
             
             # 경로 처리
             if header_input.startswith('./') or (not header_input.startswith('/') and '/' in header_input):
@@ -521,16 +526,16 @@ def get_header_path_for_struct(missing_struct: str, base_path: Path, cache: Dict
             
             if not header_path.exists():
                 print(f"파일을 찾을 수 없습니다: {header_path}")
-                retry = input("다시 입력하시겠습니까? (y/n): ").strip().lower()
-                if retry != 'y':
-                    return None
+                retry = input("다시 입력하시겠습니까? (y/n/skip): ").strip().lower()
+                if retry == 'skip' or retry != 'y':
+                    return None, []
                 continue
             
             if header_path.suffix not in ['.h', '.hpp']:
                 print(f"헤더 파일이 아닙니다: {header_path}")
-                retry = input("다시 입력하시겠습니까? (y/n): ").strip().lower()
-                if retry != 'y':
-                    return None
+                retry = input("다시 입력하시겠습니까? (y/n/skip): ").strip().lower()
+                if retry == 'skip' or retry != 'y':
+                    return None, []
                 continue
             
             # 헤더 파일에서 모든 구조체 파싱
@@ -673,13 +678,20 @@ def get_macro_array_sizes(macro_arrays: Dict, cache: Dict, discovered_macros: Di
         print(f"필드: {field_path}")
         print(f"타입: {field_type}")
         print(f"매크로: {macro_name}")
+        print(f"스킵하려면 'skip'을 입력하세요.")
         
         while True:
             try:
-                size_input = input(f"{macro_name}의 배열 크기를 입력하세요: ").strip()
+                size_input = input(f"{macro_name}의 배열 크기를 입력하세요 (또는 'skip'): ").strip()
                 if not size_input:
                     print("값을 입력해주세요.")
                     continue
+                
+                # skip 명령어 처리
+                if size_input.lower() == 'skip':
+                    print(f"  ⏭ '{macro_name}' 매크로를 스킵합니다.")
+                    break
+                
                 array_size = int(size_input)
                 if array_size < 0:
                     print("0 이상의 값을 입력해주세요.")
