@@ -464,37 +464,35 @@ def save_cache(cache_path: Path, cache: Dict):
 
 def get_header_path_for_struct(missing_struct: str, base_path: Path, cache: Dict, structs_dict: Dict) -> Tuple[Optional[Path], List[Dict]]:
     """사용자로부터 구조체가 정의된 헤더 파일 경로 입력 받기"""
-    # 캐시에서 확인
+    # 캐시에서 확인 (캐시에 있으면 바로 사용)
     cache_key = f"struct_header_paths.{missing_struct}"
     if 'struct_header_paths' in cache and missing_struct in cache['struct_header_paths']:
         cached_path_str = cache['struct_header_paths'][missing_struct]
         cached_path = Path(cached_path_str).resolve()
         if cached_path.exists():
             print(f"\n구조체 '{missing_struct}'의 헤더 파일 경로를 캐시에서 찾았습니다: {cached_path}")
-            use_cache = input("이 경로를 사용하시겠습니까? (y/n, 기본값: y): ").strip().lower()
-            if not use_cache or use_cache == 'y':
-                # 헤더 파일에서 모든 구조체 파싱하여 structs_dict에 추가
-                structs = parse_header_file(cached_path)
-                struct_names = [s['name'] for s in structs]
-                # 헤더 파일의 모든 구조체를 structs_dict에 추가
-                added_structs = []
-                found_in_cache = False
-                for struct in structs:
-                    if struct['name'] == missing_struct:
-                        found_in_cache = True
-                    if struct['name'] not in structs_dict:
-                        structs_dict[struct['name']] = struct['fields']
-                        added_structs.append(struct)
-                        print(f"  ✓ '{struct['name']}' 구조체 추가됨")
-                    else:
-                        # 이미 있는 구조체도 추가된 구조체 목록에 포함
-                        added_structs.append(struct)
-                
-                if found_in_cache:
-                    return cached_path, added_structs
+            # 헤더 파일에서 모든 구조체 파싱하여 structs_dict에 추가
+            structs = parse_header_file(cached_path)
+            struct_names = [s['name'] for s in structs]
+            # 헤더 파일의 모든 구조체를 structs_dict에 추가
+            added_structs = []
+            found_in_cache = False
+            for struct in structs:
+                if struct['name'] == missing_struct:
+                    found_in_cache = True
+                if struct['name'] not in structs_dict:
+                    structs_dict[struct['name']] = struct['fields']
+                    added_structs.append(struct)
+                    print(f"  ✓ '{struct['name']}' 구조체 추가됨")
                 else:
-                    print(f"경고: 캐시된 경로 '{cached_path}'에서 '{missing_struct}' 구조체를 찾을 수 없습니다.")
-                    # 그래도 헤더 파일의 모든 구조체는 추가했으므로 계속 진행
+                    # 이미 있는 구조체도 추가된 구조체 목록에 포함
+                    added_structs.append(struct)
+            
+            if found_in_cache:
+                return cached_path, added_structs
+            else:
+                print(f"경고: 캐시된 경로 '{cached_path}'에서 '{missing_struct}' 구조체를 찾을 수 없습니다.")
+                # 그래도 헤더 파일의 모든 구조체는 추가했으므로 계속 진행
             # 캐시된 경로가 유효하지 않거나 사용자가 거부한 경우 계속 진행
     
     print(f"\n구조체 '{missing_struct}'를 찾을 수 없습니다.")
@@ -558,8 +556,12 @@ def get_header_path_for_struct(missing_struct: str, base_path: Path, cache: Dict
             if not found_missing:
                 print(f"경고: '{header_path}'에서 '{missing_struct}' 구조체를 찾을 수 없습니다.")
                 print(f"발견된 구조체: {', '.join(struct_names) if struct_names else '없음'}")
-                retry = input("다시 입력하시겠습니까? (y/n): ").strip().lower()
+                print("옵션:")
+                print("  y: 다시 입력")
+                print("  n: 이 구조체 제외 (건너뛰기)")
+                retry = input("선택하세요 (y/n, 기본값: y): ").strip().lower()
                 if retry != 'y':
+                    # 구조체를 제외 목록에 추가하여 더 이상 확인하지 않도록
                     return None, []
                 continue
             
@@ -639,25 +641,7 @@ def get_macro_array_sizes(macro_arrays: Dict, cache: Dict, discovered_macros: Di
         field_type = info['field_type']
         field_name = info['field_name']
         
-        # 1. 헤더 파일이나 compile.json에서 발견한 매크로 확인
-        if macro_name in discovered_macros:
-            discovered_size = discovered_macros[macro_name]
-            print(f"\n[{current_count}/{total_count}] 구조체: {struct_name}")
-            print(f"필드: {field_path}")
-            print(f"타입: {field_type}")
-            print(f"매크로: {macro_name}")
-            print(f"헤더 파일/compile.json에서 발견한 값: {discovered_size}")
-            use_discovered = input("이 값을 사용하시겠습니까? (y/n, 기본값: y): ").strip().lower()
-            if not use_discovered or use_discovered == 'y':
-                macro_sizes[(struct_name, field_path)] = discovered_size
-                # 캐시에도 저장
-                cache_key = f"{struct_name}.{field_path}"
-                if 'macro_sizes' not in cache:
-                    cache['macro_sizes'] = {}
-                cache['macro_sizes'][cache_key] = discovered_size
-                continue
-        
-        # 2. 캐시에서 확인
+        # 1. 캐시에서 확인 (캐시에 있으면 바로 사용)
         cache_key = f"{struct_name}.{field_path}"
         if 'macro_sizes' in cache and cache_key in cache['macro_sizes']:
             cached_size = cache['macro_sizes'][cache_key]
@@ -665,11 +649,24 @@ def get_macro_array_sizes(macro_arrays: Dict, cache: Dict, discovered_macros: Di
             print(f"필드: {field_path}")
             print(f"타입: {field_type}")
             print(f"매크로: {macro_name}")
-            print(f"캐시된 배열 크기: {cached_size}")
-            use_cache = input("이 크기를 사용하시겠습니까? (y/n, 기본값: y): ").strip().lower()
-            if not use_cache or use_cache == 'y':
-                macro_sizes[(struct_name, field_path)] = cached_size
-                continue
+            print(f"캐시된 배열 크기: {cached_size} (자동 사용)")
+            macro_sizes[(struct_name, field_path)] = cached_size
+            continue
+        
+        # 2. 헤더 파일이나 compile.json에서 발견한 매크로 확인
+        if macro_name in discovered_macros:
+            discovered_size = discovered_macros[macro_name]
+            print(f"\n[{current_count}/{total_count}] 구조체: {struct_name}")
+            print(f"필드: {field_path}")
+            print(f"타입: {field_type}")
+            print(f"매크로: {macro_name}")
+            print(f"헤더 파일/compile.json에서 발견한 값: {discovered_size} (자동 사용)")
+            macro_sizes[(struct_name, field_path)] = discovered_size
+            # 캐시에도 저장
+            if 'macro_sizes' not in cache:
+                cache['macro_sizes'] = {}
+            cache['macro_sizes'][cache_key] = discovered_size
+            continue
         
         # 3. 사용자 입력 요청
         print(f"\n[{current_count}/{total_count}] 구조체: {struct_name}")
@@ -1058,9 +1055,14 @@ def main():
         print(f"  발견된 매크로: {', '.join(header_macros.keys())}")
         discovered_macros.update(header_macros)
     
+    # 제외된 구조체 목록 로드
+    excluded_structs = cache.get('excluded_structs', [])
+    if excluded_structs:
+        print(f"\n제외된 구조체: {', '.join(excluded_structs)}")
+    
     # 누락된 구조체 찾기 및 사용자로부터 헤더 파일 경로 입력받기
     while True:
-        missing_structs = find_missing_structs(structs, structs_dict, discovered_macros)
+        missing_structs = find_missing_structs(structs, structs_dict, discovered_macros, excluded_structs)
         if not missing_structs:
             break
         
@@ -1076,10 +1078,16 @@ def main():
                     if add_struct['name'] not in [s['name'] for s in structs]:
                         structs.append(add_struct)
             else:
-                print(f"  ✗ '{missing_struct}' 구조체를 건너뜁니다.")
-                # 건너뛴 구조체는 더 이상 확인하지 않도록 처리
+                print(f"  ✗ '{missing_struct}' 구조체를 제외합니다.")
+                # 제외된 구조체는 더 이상 확인하지 않도록 처리
                 # 임시로 빈 필드 리스트를 추가하여 에러 방지
                 structs_dict[missing_struct] = []
+                # 제외된 구조체 목록을 캐시에 저장
+                if 'excluded_structs' not in cache:
+                    cache['excluded_structs'] = []
+                if missing_struct not in cache['excluded_structs']:
+                    cache['excluded_structs'].append(missing_struct)
+                save_cache(cache_path, cache)
     
     # 매크로 배열 수집
     macro_arrays = collect_macro_arrays(structs, structs_dict)
