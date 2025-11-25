@@ -401,13 +401,15 @@ def is_likely_macro_name(name: str) -> bool:
     return False
 
 
-def find_missing_structs(structs: List[Dict], structs_dict: Dict[str, List[Tuple[str, str, int]]], discovered_macros: Dict[str, int] = None) -> List[str]:
+def find_missing_structs(structs: List[Dict], structs_dict: Dict[str, List[Tuple[str, str, int]]], discovered_macros: Dict[str, int] = None, excluded_structs: List[str] = None) -> List[str]:
     """
     구조체 필드에서 참조되지만 정의되지 않은 구조체 찾기
     Returns: 누락된 구조체 이름 리스트
     """
     if discovered_macros is None:
         discovered_macros = {}
+    if excluded_structs is None:
+        excluded_structs = []
     
     missing = set()
     checked = set()  # 이미 확인한 구조체 타입 (순환 참조 방지)
@@ -421,6 +423,10 @@ def find_missing_structs(structs: List[Dict], structs_dict: Dict[str, List[Tuple
             if base_type in checked:
                 continue
             checked.add(base_type)
+            
+            # 제외된 구조체는 스킵
+            if base_type in excluded_structs:
+                continue
             
             # 매크로 이름인지 확인 (발견된 매크로 목록에 있거나 매크로 패턴인 경우)
             if base_type in discovered_macros or is_likely_macro_name(base_type):
