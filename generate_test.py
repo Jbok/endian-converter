@@ -471,24 +471,25 @@ def get_header_path_for_struct(missing_struct: str, base_path: Path, cache: Dict
                 # 헤더 파일에서 모든 구조체 파싱하여 structs_dict에 추가
                 structs = parse_header_file(cached_path)
                 struct_names = [s['name'] for s in structs]
-                if missing_struct in struct_names:
-                    # 헤더 파일의 모든 구조체를 structs_dict에 추가
-                    added_structs = []
-                    for struct in structs:
-                        if struct['name'] not in structs_dict:
-                            structs_dict[struct['name']] = struct['fields']
-                            added_structs.append(struct)
-                            print(f"  ✓ '{struct['name']}' 구조체 추가됨")
+                # 헤더 파일의 모든 구조체를 structs_dict에 추가
+                added_structs = []
+                found_in_cache = False
+                for struct in structs:
+                    if struct['name'] == missing_struct:
+                        found_in_cache = True
+                    if struct['name'] not in structs_dict:
+                        structs_dict[struct['name']] = struct['fields']
+                        added_structs.append(struct)
+                        print(f"  ✓ '{struct['name']}' 구조체 추가됨")
+                    else:
+                        # 이미 있는 구조체도 추가된 구조체 목록에 포함
+                        added_structs.append(struct)
+                
+                if found_in_cache:
                     return cached_path, added_structs
                 else:
                     print(f"경고: 캐시된 경로 '{cached_path}'에서 '{missing_struct}' 구조체를 찾을 수 없습니다.")
-                    # 그래도 헤더 파일의 모든 구조체는 추가
-                    added_structs = []
-                    for struct in structs:
-                        if struct['name'] not in structs_dict:
-                            structs_dict[struct['name']] = struct['fields']
-                            added_structs.append(struct)
-                            print(f"  ✓ '{struct['name']}' 구조체 추가됨")
+                    # 그래도 헤더 파일의 모든 구조체는 추가했으므로 계속 진행
             # 캐시된 경로가 유효하지 않거나 사용자가 거부한 경우 계속 진행
     
     print(f"\n구조체 '{missing_struct}'를 찾을 수 없습니다.")
@@ -537,12 +538,17 @@ def get_header_path_for_struct(missing_struct: str, base_path: Path, cache: Dict
             found_missing = False
             added_structs = []
             for struct in structs:
+                # 누락된 구조체가 발견되었는지 먼저 확인
+                if struct['name'] == missing_struct:
+                    found_missing = True
+                
                 if struct['name'] not in structs_dict:
                     structs_dict[struct['name']] = struct['fields']
                     added_structs.append(struct)
                     print(f"  ✓ '{struct['name']}' 구조체 추가됨")
-                    if struct['name'] == missing_struct:
-                        found_missing = True
+                else:
+                    # 이미 있는 구조체도 추가된 구조체 목록에 포함 (필드 업데이트 확인용)
+                    added_structs.append(struct)
             
             if not found_missing:
                 print(f"경고: '{header_path}'에서 '{missing_struct}' 구조체를 찾을 수 없습니다.")
