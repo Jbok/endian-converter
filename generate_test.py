@@ -384,11 +384,26 @@ def collect_macros_from_headers(structs: List[Dict], base_path: Path, header_pat
     return all_macros
 
 
-def find_missing_structs(structs: List[Dict], structs_dict: Dict[str, List[Tuple[str, str, int]]]) -> List[str]:
+def is_likely_macro_name(name: str) -> bool:
+    """이름이 매크로 이름일 가능성이 있는지 확인"""
+    # 매크로는 보통 대문자로만 구성되거나, 대문자와 언더스코어로 구성됨
+    # 예: MAX_SIZE, MAX_DATA_BUFFER_SIZE
+    if not name:
+        return False
+    # 모두 대문자이거나 대문자와 언더스코어로만 구성된 경우 매크로로 간주
+    if name.isupper() or (name.replace('_', '').isupper() and '_' in name):
+        return True
+    return False
+
+
+def find_missing_structs(structs: List[Dict], structs_dict: Dict[str, List[Tuple[str, str, int]]], discovered_macros: Dict[str, int] = None) -> List[str]:
     """
     구조체 필드에서 참조되지만 정의되지 않은 구조체 찾기
     Returns: 누락된 구조체 이름 리스트
     """
+    if discovered_macros is None:
+        discovered_macros = {}
+    
     missing = set()
     checked = set()  # 이미 확인한 구조체 타입 (순환 참조 방지)
     
@@ -401,6 +416,10 @@ def find_missing_structs(structs: List[Dict], structs_dict: Dict[str, List[Tuple
             if base_type in checked:
                 continue
             checked.add(base_type)
+            
+            # 매크로 이름인지 확인 (발견된 매크로 목록에 있거나 매크로 패턴인 경우)
+            if base_type in discovered_macros or is_likely_macro_name(base_type):
+                continue  # 매크로는 구조체가 아니므로 스킵
             
             # 기본 타입이 아니고, 구조체 딕셔너리에 없는 경우
             if base_type not in TYPE_SIZES and base_type not in structs_dict:
@@ -438,7 +457,7 @@ def save_cache(cache_path: Path, cache: Dict):
         pass  # 캐시 저장 실패해도 계속 진행
 
 
-def get_header_path_for_struct(missing_struct: str, base_path: Path, cache: Dict) -> Optional[Path]:
+def get_header_path_for_struct(missing_struct: str, base_path: Path, cache: Dict, structs_dict: Dict) -> Optional[Path]:
     """사용자로부터 구조체가 정의된 헤더 파일 경로 입력 받기"""
     # 캐시에서 확인
     cache_key = f"struct_header_paths.{missing_struct}"
@@ -449,13 +468,23 @@ def get_header_path_for_struct(missing_struct: str, base_path: Path, cache: Dict
             print(f"\n구조체 '{missing_struct}'의 헤더 파일 경로를 캐시에서 찾았습니다: {cached_path}")
             use_cache = input("이 경로를 사용하시겠습니까? (y/n, 기본값: y): ").strip().lower()
             if not use_cache or use_cache == 'y':
-                # 헤더 파일에서 구조체 확인
+                # 헤더 파일에서 모든 구조체 파싱하여 structs_dict에 추가
                 structs = parse_header_file(cached_path)
                 struct_names = [s['name'] for s in structs]
                 if missing_struct in struct_names:
+                    # 헤더 파일의 모든 구조체를 structs_dict에 추가
+                    for struct in structs:
+                        if struct['name'] not in structs_dict:
+                            structs_dict[struct['name']] = struct['fields']
+                            print(f"  ✓ '{struct['name']}' 구조체 추가됨")
                     return cached_path
                 else:
                     print(f"경고: 캐시된 경로 '{cached_path}'에서 '{missing_struct}' 구조체를 찾을 수 없습니다.")
+                    # 그래도 헤더 파일의 모든 구조체는 추가
+                    for struct in structs:
+                        if struct['name'] not in structs_dict:
+                            structs_dict[struct['name']] = struct['fields']
+                            print(f"  ✓ '{struct['name']}' 구조체 추가됨")
             # 캐시된 경로가 유효하지 않거나 사용자가 거부한 경우 계속 진행
     
     print(f"\n구조체 '{missing_struct}'를 찾을 수 없습니다.")
@@ -496,11 +525,20 @@ def get_header_path_for_struct(missing_struct: str, base_path: Path, cache: Dict
                     return None
                 continue
             
-            # 헤더 파일에서 구조체 확인
+            # 헤더 파일에서 모든 구조체 파싱
             structs = parse_header_file(header_path)
             struct_names = [s['name'] for s in structs]
             
-            if missing_struct not in struct_names:
+            # 헤더 파일의 모든 구조체를 structs_dict에 추가
+            found_missing = False
+            for struct in structs:
+                if struct['name'] not in structs_dict:
+                    structs_dict[struct['name']] = struct['fields']
+                    print(f"  ✓ '{struct['name']}' 구조체 추가됨")
+                    if struct['name'] == missing_struct:
+                        found_missing = True
+            
+            if not found_missing:
                 print(f"경고: '{header_path}'에서 '{missing_struct}' 구조체를 찾을 수 없습니다.")
                 print(f"발견된 구조체: {', '.join(struct_names) if struct_names else '없음'}")
                 retry = input("다시 입력하시겠습니까? (y/n): ").strip().lower()
@@ -572,8 +610,14 @@ def get_macro_array_sizes(macro_arrays: Dict, cache: Dict, discovered_macros: Di
     if discovered_macros is None:
         discovered_macros = {}
     
-    print("\n=== 매크로 배열 크기 입력 ===")
+    total_count = len(macro_arrays)
+    current_count = 0
+    
+    print(f"\n=== 매크로 배열 크기 입력 ===")
+    print(f"총 {total_count}개의 매크로 배열 크기가 필요합니다.\n")
+    
     for (struct_name, field_path), info in macro_arrays.items():
+        current_count += 1
         macro_name = info['macro_name']
         field_type = info['field_type']
         field_name = info['field_name']
@@ -581,7 +625,7 @@ def get_macro_array_sizes(macro_arrays: Dict, cache: Dict, discovered_macros: Di
         # 1. 헤더 파일이나 compile.json에서 발견한 매크로 확인
         if macro_name in discovered_macros:
             discovered_size = discovered_macros[macro_name]
-            print(f"\n구조체: {struct_name}")
+            print(f"\n[{current_count}/{total_count}] 구조체: {struct_name}")
             print(f"필드: {field_path}")
             print(f"타입: {field_type}")
             print(f"매크로: {macro_name}")
@@ -600,7 +644,7 @@ def get_macro_array_sizes(macro_arrays: Dict, cache: Dict, discovered_macros: Di
         cache_key = f"{struct_name}.{field_path}"
         if 'macro_sizes' in cache and cache_key in cache['macro_sizes']:
             cached_size = cache['macro_sizes'][cache_key]
-            print(f"\n구조체: {struct_name}")
+            print(f"\n[{current_count}/{total_count}] 구조체: {struct_name}")
             print(f"필드: {field_path}")
             print(f"타입: {field_type}")
             print(f"매크로: {macro_name}")
@@ -611,7 +655,7 @@ def get_macro_array_sizes(macro_arrays: Dict, cache: Dict, discovered_macros: Di
                 continue
         
         # 3. 사용자 입력 요청
-        print(f"\n구조체: {struct_name}")
+        print(f"\n[{current_count}/{total_count}] 구조체: {struct_name}")
         print(f"필드: {field_path}")
         print(f"타입: {field_type}")
         print(f"매크로: {macro_name}")
@@ -952,26 +996,70 @@ def main():
     # 구조체 딕셔너리 생성
     structs_dict = {struct['name']: struct['fields'] for struct in structs}
     
+    # 헤더 파일과 compile.json, compile_commands.json에서 매크로 정의 자동 수집
+    discovered_macros = {}
+    
+    # 1. compile_commands.json 파일 확인 (CMake 빌드 시 생성)
+    compile_commands_path = base_path / 'compile_commands.json'
+    if not compile_commands_path.exists():
+        # build 디렉토리나 상위 디렉토리에서도 찾기
+        for search_path in [base_path.parent / 'build', base_path.parent, base_path]:
+            potential_path = search_path / 'compile_commands.json'
+            if potential_path.exists():
+                compile_commands_path = potential_path
+                break
+    
+    if compile_commands_path.exists():
+        print(f"\ncompile_commands.json 파일에서 매크로 정의를 찾는 중... ({compile_commands_path})")
+        compile_commands_macros = parse_macros_from_compile_commands(compile_commands_path)
+        if compile_commands_macros:
+            print(f"  발견된 매크로: {', '.join(compile_commands_macros.keys())}")
+            discovered_macros.update(compile_commands_macros)
+    
+    # 2. compile.json 파일 확인
+    compile_json_path = base_path / 'compile.json'
+    if compile_json_path.exists():
+        print(f"\ncompile.json 파일에서 매크로 정의를 찾는 중...")
+        compile_macros = parse_macros_from_compile_json(compile_json_path)
+        if compile_macros:
+            print(f"  발견된 매크로: {', '.join(compile_macros.keys())}")
+            discovered_macros.update(compile_macros)
+    
+    # 3. 헤더 파일들에서 매크로 정의 수집
+    # 구조체가 정의된 헤더 파일과 include된 헤더 파일들 확인
+    header_paths = [header_path]
+    # 캐시에서 추가된 헤더 파일 경로들도 포함
+    if 'struct_header_paths' in cache:
+        for cached_path_str in cache['struct_header_paths'].values():
+            cached_path = Path(cached_path_str)
+            if cached_path.exists() and cached_path not in header_paths:
+                header_paths.append(cached_path)
+    
+    print(f"\n헤더 파일들에서 매크로 정의를 찾는 중...")
+    header_macros = collect_macros_from_headers(structs, base_path, header_paths)
+    if header_macros:
+        print(f"  발견된 매크로: {', '.join(header_macros.keys())}")
+        discovered_macros.update(header_macros)
+    
     # 누락된 구조체 찾기 및 사용자로부터 헤더 파일 경로 입력받기
     while True:
-        missing_structs = find_missing_structs(structs, structs_dict)
+        missing_structs = find_missing_structs(structs, structs_dict, discovered_macros)
         if not missing_structs:
             break
         
         print(f"\n=== 누락된 구조체 발견 ===")
         for missing_struct in missing_structs:
-            header_path_for_struct = get_header_path_for_struct(missing_struct, base_path, cache)
+            header_path_for_struct = get_header_path_for_struct(missing_struct, base_path, cache, structs_dict)
             # 캐시 저장 (경로가 추가되었을 수 있음)
             save_cache(cache_path, cache)
             
             if header_path_for_struct:
-                # 헤더 파일 파싱하여 구조체 추가
+                # get_header_path_for_struct 함수 내에서 이미 모든 구조체를 structs_dict에 추가했으므로
+                # structs 리스트도 업데이트
                 additional_structs = parse_header_file(header_path_for_struct)
                 for add_struct in additional_structs:
-                    if add_struct['name'] not in structs_dict:
+                    if add_struct['name'] not in [s['name'] for s in structs]:
                         structs.append(add_struct)
-                        structs_dict[add_struct['name']] = add_struct['fields']
-                        print(f"  ✓ '{add_struct['name']}' 구조체 추가됨")
             else:
                 print(f"  ✗ '{missing_struct}' 구조체를 건너뜁니다.")
                 # 건너뛴 구조체는 더 이상 확인하지 않도록 처리
