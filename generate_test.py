@@ -5,6 +5,7 @@
 
 import re
 import sys
+import json
 from typing import List, Tuple, Dict, Optional
 from pathlib import Path
 
@@ -235,6 +236,154 @@ def get_macro_name(field_type: str) -> Optional[str]:
     return None
 
 
+def parse_macros_from_header(header_path: Path) -> Dict[str, int]:
+    """헤더 파일에서 #define 매크로 정의 파싱"""
+    macros = {}
+    try:
+        with open(header_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # #define 매크로 패턴 찾기
+        # 예: #define MAX_SENSOR_COUNT 16
+        # 예: #define MAX_SENSOR_COUNT       16
+        pattern = r'#define\s+(\w+)\s+(\d+)'
+        matches = re.findall(pattern, content)
+        
+        for macro_name, macro_value in matches:
+            try:
+                macros[macro_name] = int(macro_value)
+            except ValueError:
+                pass  # 숫자가 아닌 값은 무시
+    except (IOError, UnicodeDecodeError):
+        pass
+    
+    return macros
+
+
+def parse_macros_from_compile_commands(compile_commands_path: Path) -> Dict[str, int]:
+    """compile_commands.json 파일에서 컴파일러 플래그(-D)로 정의된 매크로 파싱"""
+    macros = {}
+    try:
+        with open(compile_commands_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        # compile_commands.json은 배열 형식
+        if not isinstance(data, list):
+            return macros
+        
+        # 각 컴파일 명령어에서 -D 플래그 추출
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            
+            # "command" 필드에서 -D 플래그 찾기
+            command = entry.get('command', '')
+            if not command:
+                # "arguments" 필드가 있는 경우 (일부 도구는 이 형식 사용)
+                arguments = entry.get('arguments', [])
+                if isinstance(arguments, list):
+                    command = ' '.join(str(arg) for arg in arguments)
+            
+            # -D 플래그 패턴 찾기
+            # 형식 1: -DMAX_SENSOR_COUNT=16
+            # 형식 2: -D MAX_SENSOR_COUNT=16 (공백 포함)
+            # 형식 3: -D"MAX_SENSOR_COUNT=16" (따옴표 포함)
+            # 형식 4: -D MAX_SENSOR_COUNT (값 없음, 1로 간주)
+            
+            # 통합 패턴: -D 다음에 공백/따옴표가 있을 수 있고, 매크로 이름과 선택적 값
+            # 모든 -D 플래그를 찾되, 중복 제거를 위해 set 사용
+            define_pattern = r'-D\s*(?:["\'])?(\w+)(?:=(\d+))?(?:["\'])?(?=\s|$|")'
+            matches = re.findall(define_pattern, command)
+            
+            for macro_name, macro_value in matches:
+                if macro_value:
+                    # 값이 있는 경우
+                    try:
+                        macros[macro_name] = int(macro_value)
+                    except ValueError:
+                        pass
+                else:
+                    # 값이 없는 경우 1로 설정
+                    macros[macro_name] = 1
+                    
+    except (IOError, json.JSONDecodeError, KeyError, AttributeError):
+        pass
+    
+    return macros
+
+
+def parse_macros_from_compile_json(compile_json_path: Path) -> Dict[str, int]:
+    """compile.json 파일에서 매크로 정의 파싱"""
+    macros = {}
+    try:
+        with open(compile_json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        # compile.json의 다양한 형식 지원
+        # 형식 1: { "defines": { "MAX_SENSOR_COUNT": 16, ... } }
+        if isinstance(data, dict):
+            if 'defines' in data and isinstance(data['defines'], dict):
+                for key, value in data['defines'].items():
+                    if isinstance(value, (int, str)):
+                        try:
+                            macros[key] = int(value)
+                        except (ValueError, TypeError):
+                            pass
+            
+            # 형식 2: { "macros": { "MAX_SENSOR_COUNT": 16, ... } }
+            elif 'macros' in data and isinstance(data['macros'], dict):
+                for key, value in data['macros'].items():
+                    if isinstance(value, (int, str)):
+                        try:
+                            macros[key] = int(value)
+                        except (ValueError, TypeError):
+                            pass
+    except (IOError, json.JSONDecodeError, KeyError):
+        pass
+    
+    return macros
+
+
+def collect_macros_from_headers(structs: List[Dict], base_path: Path, header_paths: List[Path]) -> Dict[str, int]:
+    """구조체에서 참조하는 헤더 파일들에서 매크로 수집"""
+    all_macros = {}
+    
+    # 이미 파싱한 헤더 파일들
+    parsed_headers = set()
+    
+    # 기본 헤더 파일들 파싱
+    for header_path in header_paths:
+        if header_path.exists() and header_path not in parsed_headers:
+            macros = parse_macros_from_header(header_path)
+            all_macros.update(macros)
+            parsed_headers.add(header_path)
+    
+    # 구조체에서 참조하는 헤더 파일 찾기
+    # include 문을 찾기 위해 헤더 파일들을 다시 읽어야 함
+    for header_path in header_paths:
+        if not header_path.exists():
+            continue
+        
+        try:
+            with open(header_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # #include "..." 패턴 찾기
+            include_pattern = r'#include\s+"([^"]+)"'
+            includes = re.findall(include_pattern, content)
+            
+            for include_file in includes:
+                include_path = base_path / include_file
+                if include_path.exists() and include_path not in parsed_headers:
+                    macros = parse_macros_from_header(include_path)
+                    all_macros.update(macros)
+                    parsed_headers.add(include_path)
+        except (IOError, UnicodeDecodeError):
+            continue
+    
+    return all_macros
+
+
 def find_missing_structs(structs: List[Dict], structs_dict: Dict[str, List[Tuple[str, str, int]]]) -> List[str]:
     """
     구조체 필드에서 참조되지만 정의되지 않은 구조체 찾기
@@ -269,8 +418,46 @@ def find_missing_structs(structs: List[Dict], structs_dict: Dict[str, List[Tuple
     return sorted(list(missing))
 
 
-def get_header_path_for_struct(missing_struct: str, base_path: Path) -> Optional[Path]:
+def load_cache(cache_path: Path) -> Dict:
+    """캐시 파일 로드"""
+    if cache_path.exists():
+        try:
+            with open(cache_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return {}
+    return {}
+
+
+def save_cache(cache_path: Path, cache: Dict):
+    """캐시 파일 저장"""
+    try:
+        with open(cache_path, 'w', encoding='utf-8') as f:
+            json.dump(cache, f, indent=2, ensure_ascii=False)
+    except IOError:
+        pass  # 캐시 저장 실패해도 계속 진행
+
+
+def get_header_path_for_struct(missing_struct: str, base_path: Path, cache: Dict) -> Optional[Path]:
     """사용자로부터 구조체가 정의된 헤더 파일 경로 입력 받기"""
+    # 캐시에서 확인
+    cache_key = f"struct_header_paths.{missing_struct}"
+    if 'struct_header_paths' in cache and missing_struct in cache['struct_header_paths']:
+        cached_path_str = cache['struct_header_paths'][missing_struct]
+        cached_path = Path(cached_path_str).resolve()
+        if cached_path.exists():
+            print(f"\n구조체 '{missing_struct}'의 헤더 파일 경로를 캐시에서 찾았습니다: {cached_path}")
+            use_cache = input("이 경로를 사용하시겠습니까? (y/n, 기본값: y): ").strip().lower()
+            if not use_cache or use_cache == 'y':
+                # 헤더 파일에서 구조체 확인
+                structs = parse_header_file(cached_path)
+                struct_names = [s['name'] for s in structs]
+                if missing_struct in struct_names:
+                    return cached_path
+                else:
+                    print(f"경고: 캐시된 경로 '{cached_path}'에서 '{missing_struct}' 구조체를 찾을 수 없습니다.")
+            # 캐시된 경로가 유효하지 않거나 사용자가 거부한 경우 계속 진행
+    
     print(f"\n구조체 '{missing_struct}'를 찾을 수 없습니다.")
     print(f"이 구조체가 정의된 헤더 파일의 경로를 입력해주세요.")
     print(f"(현재 디렉토리 기준: {base_path.absolute()})")
@@ -321,6 +508,11 @@ def get_header_path_for_struct(missing_struct: str, base_path: Path) -> Optional
                     return None
                 continue
             
+            # 캐시에 저장
+            if 'struct_header_paths' not in cache:
+                cache['struct_header_paths'] = {}
+            cache['struct_header_paths'][missing_struct] = str(header_path.resolve())
+            
             return header_path
             
         except KeyboardInterrupt:
@@ -370,12 +562,15 @@ def collect_macro_arrays(structs: List[Dict], structs_dict: Dict[str, List[Tuple
     return macro_arrays
 
 
-def get_macro_array_sizes(macro_arrays: Dict) -> Dict[Tuple[str, str], int]:
-    """사용자로부터 매크로 배열 크기 입력 받기"""
+def get_macro_array_sizes(macro_arrays: Dict, cache: Dict, discovered_macros: Dict[str, int] = None) -> Dict[Tuple[str, str], int]:
+    """사용자로부터 매크로 배열 크기 입력 받기 (헤더 파일이나 compile.json에서 발견한 매크로 우선 사용)"""
     macro_sizes = {}
     
     if not macro_arrays:
         return macro_sizes
+    
+    if discovered_macros is None:
+        discovered_macros = {}
     
     print("\n=== 매크로 배열 크기 입력 ===")
     for (struct_name, field_path), info in macro_arrays.items():
@@ -383,6 +578,39 @@ def get_macro_array_sizes(macro_arrays: Dict) -> Dict[Tuple[str, str], int]:
         field_type = info['field_type']
         field_name = info['field_name']
         
+        # 1. 헤더 파일이나 compile.json에서 발견한 매크로 확인
+        if macro_name in discovered_macros:
+            discovered_size = discovered_macros[macro_name]
+            print(f"\n구조체: {struct_name}")
+            print(f"필드: {field_path}")
+            print(f"타입: {field_type}")
+            print(f"매크로: {macro_name}")
+            print(f"헤더 파일/compile.json에서 발견한 값: {discovered_size}")
+            use_discovered = input("이 값을 사용하시겠습니까? (y/n, 기본값: y): ").strip().lower()
+            if not use_discovered or use_discovered == 'y':
+                macro_sizes[(struct_name, field_path)] = discovered_size
+                # 캐시에도 저장
+                cache_key = f"{struct_name}.{field_path}"
+                if 'macro_sizes' not in cache:
+                    cache['macro_sizes'] = {}
+                cache['macro_sizes'][cache_key] = discovered_size
+                continue
+        
+        # 2. 캐시에서 확인
+        cache_key = f"{struct_name}.{field_path}"
+        if 'macro_sizes' in cache and cache_key in cache['macro_sizes']:
+            cached_size = cache['macro_sizes'][cache_key]
+            print(f"\n구조체: {struct_name}")
+            print(f"필드: {field_path}")
+            print(f"타입: {field_type}")
+            print(f"매크로: {macro_name}")
+            print(f"캐시된 배열 크기: {cached_size}")
+            use_cache = input("이 크기를 사용하시겠습니까? (y/n, 기본값: y): ").strip().lower()
+            if not use_cache or use_cache == 'y':
+                macro_sizes[(struct_name, field_path)] = cached_size
+                continue
+        
+        # 3. 사용자 입력 요청
         print(f"\n구조체: {struct_name}")
         print(f"필드: {field_path}")
         print(f"타입: {field_type}")
@@ -399,6 +627,12 @@ def get_macro_array_sizes(macro_arrays: Dict) -> Dict[Tuple[str, str], int]:
                     print("0 이상의 값을 입력해주세요.")
                     continue
                 macro_sizes[(struct_name, field_path)] = array_size
+                
+                # 캐시에 저장
+                if 'macro_sizes' not in cache:
+                    cache['macro_sizes'] = {}
+                cache['macro_sizes'][cache_key] = array_size
+                
                 break
             except ValueError:
                 print("올바른 숫자를 입력해주세요.")
@@ -453,7 +687,11 @@ def generate_big_endian_bytes(struct_name: str, fields: List[Tuple[str, str, int
                         for elem_idx in range(array_size):
                             bytes_list = []
                             for i in range(base_size):
-                                bytes_list.append(f"0x{byte_pattern[i % len(byte_pattern)]:02X}")
+                                # uint8_t의 경우 첫 번째 바이트 값만 반복
+                                if base_type == 'uint8_t' or base_type == 'int8_t' or base_type == 'char':
+                                    bytes_list.append(f"0x{byte_pattern[0]:02X}")
+                                else:
+                                    bytes_list.append(f"0x{byte_pattern[i % len(byte_pattern)]:02X}")
                             bytes_str = ", ".join(bytes_list)
                             lines.append(f"        {bytes_str}, //{base_type} {field_name}[{elem_idx}];")
                     else:
@@ -487,8 +725,14 @@ def generate_big_endian_bytes(struct_name: str, fields: List[Tuple[str, str, int
         else:
             # Big endian: 상위 바이트부터
             bytes_list = []
+            # 필드 타입 추출 (배열 제거)
+            base_type = re.sub(r'\[.*?\]', '', field_type).strip()
             for i in range(size):
-                bytes_list.append(f"0x{byte_pattern[i % len(byte_pattern)]:02X}")
+                # uint8_t의 경우 첫 번째 바이트 값만 반복
+                if base_type == 'uint8_t' or base_type == 'int8_t' or base_type == 'char':
+                    bytes_list.append(f"0x{byte_pattern[0]:02X}")
+                else:
+                    bytes_list.append(f"0x{byte_pattern[i % len(byte_pattern)]:02X}")
             
             bytes_str = ", ".join(bytes_list)
             lines.append(f"        {bytes_str}, //{field_type} {field_name};")
@@ -541,7 +785,11 @@ def generate_little_endian_bytes(struct_name: str, fields: List[Tuple[str, str, 
                         for elem_idx in range(array_size):
                             bytes_list = []
                             for i in range(base_size - 1, -1, -1):
-                                bytes_list.append(f"0x{byte_pattern[i % len(byte_pattern)]:02X}")
+                                # uint8_t의 경우 첫 번째 바이트 값만 반복
+                                if base_type == 'uint8_t' or base_type == 'int8_t' or base_type == 'char':
+                                    bytes_list.append(f"0x{byte_pattern[0]:02X}")
+                                else:
+                                    bytes_list.append(f"0x{byte_pattern[i % len(byte_pattern)]:02X}")
                             bytes_str = ", ".join(bytes_list)
                             lines.append(f"        {bytes_str}, //{base_type} {field_name}[{elem_idx}];")
                     else:
@@ -575,8 +823,14 @@ def generate_little_endian_bytes(struct_name: str, fields: List[Tuple[str, str, 
         else:
             # Little endian: 하위 바이트부터 (역순)
             bytes_list = []
+            # 필드 타입 추출 (배열 제거)
+            base_type = re.sub(r'\[.*?\]', '', field_type).strip()
             for i in range(size - 1, -1, -1):
-                bytes_list.append(f"0x{byte_pattern[i % len(byte_pattern)]:02X}")
+                # uint8_t의 경우 첫 번째 바이트 값만 반복
+                if base_type == 'uint8_t' or base_type == 'int8_t' or base_type == 'char':
+                    bytes_list.append(f"0x{byte_pattern[0]:02X}")
+                else:
+                    bytes_list.append(f"0x{byte_pattern[i % len(byte_pattern)]:02X}")
             
             bytes_str = ", ".join(bytes_list)
             lines.append(f"        {bytes_str}, //{field_type} {field_name};")
@@ -631,13 +885,34 @@ def generate_test_code(structs: List[Dict], header_name: str, macro_sizes: Dict[
         lines.append("")
         
         # 배열 크기 검증
-        lines.append(f"    EXPECT_EQ(sizeof(big_endian_raw_{struct_name}), sizeof({struct_name}));")
-        lines.append(f"    EXPECT_EQ(sizeof(little_endian_raw_{struct_name}), sizeof({struct_name}));")
+        lines.append(f"    EXPECT_EQ(sizeof(big_endian_raw_{struct_name}), ")
+        lines.append(f"sizeof({struct_name}));")
+        lines.append(f"    EXPECT_EQ(sizeof(little_endian_raw_{struct_name}), ")
+        lines.append(f"sizeof({struct_name}));")
         lines.append("")
         
-        # endian_converter 호출 및 검증
-        lines.append(f"    endian_converter(big_endian_raw_{struct_name}, {struct_name});")
-        lines.append(f"    EXPECT_EQ(0, memcmp(big_endian_raw_{struct_name}, little_endian_raw_{struct_name}, sizeof({struct_name})));")
+        # 구조체 ID 매크로 이름 생성 (소문자로 유지)
+        # 구조체 이름이 _type으로 끝나면 _id로 변경
+        if struct_name.endswith('_type'):
+            struct_id_macro = struct_name[:-5] + "_id"  # _type 제거 후 _id 추가
+        else:
+            struct_id_macro = struct_name + "_id"
+        
+        # 포인터 선언 및 필드 설정 (msgType 필드 사용)
+        lines.append(f"    messageHdr_type *pBigEndianMsgHdr = (messageHdr_type *)big_endian_raw_{struct_name};")
+        lines.append(f"    messageHdr_type *pLittleEndianMsgHdr = (messageHdr_type *)little_endian_raw_{struct_name};")
+        lines.append(f"    pBigEndianMsgHdr ->msgType = {struct_id_macro};")
+        lines.append(f"    pLittleEndianMsgHdr->msgType = ntohs({struct_id_macro});")
+        lines.append("")
+        
+        # Gcci_EndianH2N 호출
+        lines.append(f"    Gcci_EndianH2N(big_endian_raw_{struct_name}, sizeof({struct_name}));")
+        lines.append("")
+        
+        # memcmp 검증
+        lines.append(f"    EXPECT_EQ(0, memcmp(big_endian_raw_{struct_name}, ")
+        lines.append(f"little_endian_raw_{struct_name},")
+        lines.append(f"sizeof(little_endian_raw_{struct_name})));")
         lines.append("}")
         lines.append("")
     
@@ -655,6 +930,13 @@ def main():
         print(f"오류: 파일을 찾을 수 없습니다: {header_path}")
         sys.exit(1)
     
+    # 캐시 파일 경로 설정 (현재 디렉토리의 .endian_converter_cache.json)
+    base_path = header_path.parent
+    cache_path = base_path / '.endian_converter_cache.json'
+    
+    # 캐시 로드
+    cache = load_cache(cache_path)
+    
     # 구조체 파싱
     print(f"헤더 파일 파싱 중: {header_path}")
     structs = parse_header_file(header_path)
@@ -671,7 +953,6 @@ def main():
     structs_dict = {struct['name']: struct['fields'] for struct in structs}
     
     # 누락된 구조체 찾기 및 사용자로부터 헤더 파일 경로 입력받기
-    base_path = header_path.parent
     while True:
         missing_structs = find_missing_structs(structs, structs_dict)
         if not missing_structs:
@@ -679,7 +960,10 @@ def main():
         
         print(f"\n=== 누락된 구조체 발견 ===")
         for missing_struct in missing_structs:
-            header_path_for_struct = get_header_path_for_struct(missing_struct, base_path)
+            header_path_for_struct = get_header_path_for_struct(missing_struct, base_path, cache)
+            # 캐시 저장 (경로가 추가되었을 수 있음)
+            save_cache(cache_path, cache)
+            
             if header_path_for_struct:
                 # 헤더 파일 파싱하여 구조체 추가
                 additional_structs = parse_header_file(header_path_for_struct)
@@ -697,8 +981,55 @@ def main():
     # 매크로 배열 수집
     macro_arrays = collect_macro_arrays(structs, structs_dict)
     
-    # 사용자로부터 매크로 배열 크기 입력 받기
-    macro_sizes = get_macro_array_sizes(macro_arrays)
+    # 헤더 파일과 compile.json, compile_commands.json에서 매크로 정의 자동 수집
+    discovered_macros = {}
+    
+    # 1. compile_commands.json 파일 확인 (CMake 빌드 시 생성)
+    compile_commands_path = base_path / 'compile_commands.json'
+    if not compile_commands_path.exists():
+        # build 디렉토리나 상위 디렉토리에서도 찾기
+        for search_path in [base_path.parent / 'build', base_path.parent, base_path]:
+            potential_path = search_path / 'compile_commands.json'
+            if potential_path.exists():
+                compile_commands_path = potential_path
+                break
+    
+    if compile_commands_path.exists():
+        print(f"\ncompile_commands.json 파일에서 매크로 정의를 찾는 중... ({compile_commands_path})")
+        compile_commands_macros = parse_macros_from_compile_commands(compile_commands_path)
+        if compile_commands_macros:
+            print(f"  발견된 매크로: {', '.join(compile_commands_macros.keys())}")
+            discovered_macros.update(compile_commands_macros)
+    
+    # 2. compile.json 파일 확인
+    compile_json_path = base_path / 'compile.json'
+    if compile_json_path.exists():
+        print(f"\ncompile.json 파일에서 매크로 정의를 찾는 중...")
+        compile_macros = parse_macros_from_compile_json(compile_json_path)
+        if compile_macros:
+            print(f"  발견된 매크로: {', '.join(compile_macros.keys())}")
+            discovered_macros.update(compile_macros)
+    
+    # 3. 헤더 파일들에서 매크로 정의 수집
+    # 구조체가 정의된 헤더 파일과 include된 헤더 파일들 확인
+    header_paths = [header_path]
+    # 캐시에서 추가된 헤더 파일 경로들도 포함
+    if 'struct_header_paths' in cache:
+        for cached_path_str in cache['struct_header_paths'].values():
+            cached_path = Path(cached_path_str)
+            if cached_path.exists() and cached_path not in header_paths:
+                header_paths.append(cached_path)
+    
+    print(f"\n헤더 파일들에서 매크로 정의를 찾는 중...")
+    header_macros = collect_macros_from_headers(structs, base_path, header_paths)
+    if header_macros:
+        print(f"  발견된 매크로: {', '.join(header_macros.keys())}")
+        discovered_macros.update(header_macros)
+    
+    # 사용자로부터 매크로 배열 크기 입력 받기 (발견한 매크로 우선 사용)
+    macro_sizes = get_macro_array_sizes(macro_arrays, cache, discovered_macros)
+    # 캐시 저장 (매크로 크기가 추가되었을 수 있음)
+    save_cache(cache_path, cache)
     
     # 테스트 코드 생성
     header_name = header_path.name
