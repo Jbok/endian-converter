@@ -66,6 +66,10 @@ def parse_struct_block(struct_block: str) -> Tuple[Optional[str], List[Tuple[str
     # 주석 제거
     clean_block = remove_comments(struct_block)
     
+    # union인지 확인 (union은 제외)
+    if re.search(r'typedef\s+union\s', clean_block):
+        return None, []
+    
     # 구조체 이름 추출: } 다음에 오는 이름
     # 패턴: } [attribute] 이름; 또는 } 이름 [attribute];
     # 먼저 } 다음의 모든 텍스트 추출
@@ -165,7 +169,7 @@ def parse_field_line(line: str) -> Optional[Tuple[str, str, int]]:
 
 
 def parse_header_file(header_path: Path) -> List[Dict]:
-    """헤더 파일에서 모든 구조체 파싱"""
+    """헤더 파일에서 모든 구조체 파싱 (union 제외)"""
     with open(header_path, 'r', encoding='utf-8') as f:
         content = f.read()
     
@@ -173,6 +177,7 @@ def parse_header_file(header_path: Path) -> List[Dict]:
     
     # typedef struct 블록 찾기 (여러 줄에 걸쳐 있을 수 있음)
     # 패턴: typedef struct [이름]? { ... } [이름];
+    # union은 제외
     
     # 정규식으로 구조체 블록 찾기
     # { 와 } 의 매칭을 위해 간단한 방법 사용
