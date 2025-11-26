@@ -630,9 +630,13 @@ def collect_macro_arrays(structs: List[Dict], structs_dict: Dict[str, List[Tuple
     return macro_arrays
 
 
-def get_macro_array_sizes(macro_arrays: Dict, cache: Dict, discovered_macros: Dict[str, int] = None) -> Dict[Tuple[str, str], int]:
-    """사용자로부터 매크로 배열 크기 입력 받기 (헤더 파일이나 compile.json에서 발견한 매크로 우선 사용)"""
-    macro_sizes = {}
+def get_macro_array_sizes(macro_arrays: Dict, cache: Dict, discovered_macros: Dict[str, int] = None) -> Dict[str, int]:
+    """사용자로부터 매크로 배열 크기 입력 받기 (헤더 파일이나 compile.json에서 발견한 매크로 우선 사용)
+
+    macro_sizes는 (struct_name, field_path)가 아닌 **매크로 이름(macro_name)**을 키로 사용한다.
+    동일한 매크로 이름을 사용하는 모든 배열은 하나의 값만 입력/저장하여 공유한다.
+    """
+    macro_sizes: Dict[str, int] = {}
     
     if not macro_arrays:
         return macro_sizes
@@ -640,50 +644,57 @@ def get_macro_array_sizes(macro_arrays: Dict, cache: Dict, discovered_macros: Di
     if discovered_macros is None:
         discovered_macros = {}
     
-    total_count = len(macro_arrays)
+    # 서로 다른 매크로 이름 개수 기준으로 카운트
+    unique_macro_names = sorted({info['macro_name'] for info in macro_arrays.values()})
+    total_count = len(unique_macro_names)
     current_count = 0
+    processed_macros = set()
     
     print(f"\n=== 매크로 배열 크기 입력 ===")
     print(f"총 {total_count}개의 매크로 배열 크기가 필요합니다.\n")
     
     for (struct_name, field_path), info in macro_arrays.items():
-        current_count += 1
         macro_name = info['macro_name']
         field_type = info['field_type']
         field_name = info['field_name']
+
+        # 같은 매크로 이름은 한 번만 처리
+        if macro_name in processed_macros:
+            continue
+        processed_macros.add(macro_name)
+        current_count += 1
         
         # 1. 캐시에서 확인 (캐시에 있으면 바로 사용)
-        cache_key = f"{struct_name}.{field_path}"
-        if 'macro_sizes' in cache and cache_key in cache['macro_sizes']:
-            cached_size = cache['macro_sizes'][cache_key]
-            print(f"\n[{current_count}/{total_count}] 구조체: {struct_name}")
-            print(f"필드: {field_path}")
+        if 'macro_sizes' in cache and macro_name in cache['macro_sizes']:
+            cached_size = cache['macro_sizes'][macro_name]
+            print(f"\n[{current_count}/{total_count}] 매크로: {macro_name}")
+            print(f"예시 구조체: {struct_name}")
+            print(f"예시 필드: {field_path}")
             print(f"타입: {field_type}")
-            print(f"매크로: {macro_name}")
             print(f"캐시된 배열 크기: {cached_size} (자동 사용)")
-            macro_sizes[(struct_name, field_path)] = cached_size
+            macro_sizes[macro_name] = cached_size
             continue
         
         # 2. 헤더 파일이나 compile.json에서 발견한 매크로 확인
         if macro_name in discovered_macros:
             discovered_size = discovered_macros[macro_name]
-            print(f"\n[{current_count}/{total_count}] 구조체: {struct_name}")
-            print(f"필드: {field_path}")
+            print(f"\n[{current_count}/{total_count}] 매크로: {macro_name}")
+            print(f"예시 구조체: {struct_name}")
+            print(f"예시 필드: {field_path}")
             print(f"타입: {field_type}")
-            print(f"매크로: {macro_name}")
             print(f"헤더 파일/compile.json에서 발견한 값: {discovered_size} (자동 사용)")
-            macro_sizes[(struct_name, field_path)] = discovered_size
+            macro_sizes[macro_name] = discovered_size
             # 캐시에도 저장
             if 'macro_sizes' not in cache:
                 cache['macro_sizes'] = {}
-            cache['macro_sizes'][cache_key] = discovered_size
+            cache['macro_sizes'][macro_name] = discovered_size
             continue
         
         # 3. 사용자 입력 요청
-        print(f"\n[{current_count}/{total_count}] 구조체: {struct_name}")
-        print(f"필드: {field_path}")
+        print(f"\n[{current_count}/{total_count}] 매크로: {macro_name}")
+        print(f"예시 구조체: {struct_name}")
+        print(f"예시 필드: {field_path}")
         print(f"타입: {field_type}")
-        print(f"매크로: {macro_name}")
         print(f"스킵하려면 'skip'을 입력하세요.")
         
         while True:
@@ -702,12 +713,12 @@ def get_macro_array_sizes(macro_arrays: Dict, cache: Dict, discovered_macros: Di
                 if array_size < 0:
                     print("0 이상의 값을 입력해주세요.")
                     continue
-                macro_sizes[(struct_name, field_path)] = array_size
+                macro_sizes[macro_name] = array_size
                 
                 # 캐시에 저장
                 if 'macro_sizes' not in cache:
                     cache['macro_sizes'] = {}
-                cache['macro_sizes'][cache_key] = array_size
+                cache['macro_sizes'][macro_name] = array_size
                 
                 break
             except ValueError:
@@ -719,13 +730,24 @@ def get_macro_array_sizes(macro_arrays: Dict, cache: Dict, discovered_macros: Di
     return macro_sizes
 
 
-def generate_big_endian_bytes(struct_name: str, fields: List[Tuple[str, str, int]], structs_dict: Dict[str, List[Tuple[str, str, int]]] = None, macro_sizes: Dict[Tuple[str, str], int] = None, field_path: str = "") -> str:
+def generate_big_endian_bytes(struct_name: str, fields: List[Tuple[str, str, int]], structs_dict: Dict[str, List[Tuple[str, str, int]]] = None, macro_sizes: Dict[str, int] = None, field_path: str = "") -> str:
     """Big endian 바이트 배열 생성"""
     if structs_dict is None:
         structs_dict = {}
     if macro_sizes is None:
         macro_sizes = {}
     
+    def append_bytes_with_wrap(lines: List[str], bytes_list: List[str], comment: str = "", indent: str = "        ", max_per_line: int = 16) -> None:
+        """bytes_list를 최대 max_per_line개씩 끊어서 여러 줄로 추가"""
+        for idx in range(0, len(bytes_list), max_per_line):
+            chunk = bytes_list[idx:idx + max_per_line]
+            chunk_str = ", ".join(chunk)
+            # 첫 줄에만 주석 출력
+            if idx == 0 and comment:
+                lines.append(f"{indent}{chunk_str}, {comment}")
+            else:
+                lines.append(f"{indent}{chunk_str},")
+
     lines = []
     lines.append(f"    uint8_t big_endian_raw_{struct_name}[] = ")
     lines.append("    {")
@@ -739,9 +761,9 @@ def generate_big_endian_bytes(struct_name: str, fields: List[Tuple[str, str, int
         if size == 0:
             # 크기를 알 수 없는 경우
             if is_macro_array(field_type):
-                # 매크로 배열인 경우 사용자 입력 크기 사용
-                key = (struct_name, current_field_path)
-                array_size = macro_sizes.get(key, 0)
+                # 매크로 배열인 경우 매크로 이름 기반 크기 사용
+                macro_name = get_macro_name(field_type)
+                array_size = macro_sizes.get(macro_name, 0) if macro_name else 0
                 if array_size > 0:
                     base_type = re.sub(r'\[.*?\]', '', field_type).strip()
                     base_size = TYPE_SIZES.get(base_type, 0)
@@ -810,20 +832,31 @@ def generate_big_endian_bytes(struct_name: str, fields: List[Tuple[str, str, int
                 else:
                     bytes_list.append(f"0x{byte_pattern[i % len(byte_pattern)]:02X}")
             
-            bytes_str = ", ".join(bytes_list)
-            lines.append(f"        {bytes_str}, //{field_type} {field_name};")
+            comment = f"//{field_type} {field_name};"
+            append_bytes_with_wrap(lines, bytes_list, comment=comment)
     
     lines.append("    }")
     return "\n".join(lines)
 
 
-def generate_little_endian_bytes(struct_name: str, fields: List[Tuple[str, str, int]], structs_dict: Dict[str, List[Tuple[str, str, int]]] = None, macro_sizes: Dict[Tuple[str, str], int] = None, field_path: str = "") -> str:
+def generate_little_endian_bytes(struct_name: str, fields: List[Tuple[str, str, int]], structs_dict: Dict[str, List[Tuple[str, str, int]]] = None, macro_sizes: Dict[str, int] = None, field_path: str = "") -> str:
     """Little endian 바이트 배열 생성"""
     if structs_dict is None:
         structs_dict = {}
     if macro_sizes is None:
         macro_sizes = {}
     
+    def append_bytes_with_wrap(lines: List[str], bytes_list: List[str], comment: str = "", indent: str = "        ", max_per_line: int = 16) -> None:
+        """bytes_list를 최대 max_per_line개씩 끊어서 여러 줄로 추가"""
+        for idx in range(0, len(bytes_list), max_per_line):
+            chunk = bytes_list[idx:idx + max_per_line]
+            chunk_str = ", ".join(chunk)
+            # 첫 줄에만 주석 출력
+            if idx == 0 and comment:
+                lines.append(f"{indent}{chunk_str}, {comment}")
+            else:
+                lines.append(f"{indent}{chunk_str},")
+
     lines = []
     lines.append(f"    uint8_t little_endian_raw_{struct_name}[] = ")
     lines.append("    {")
@@ -837,9 +870,9 @@ def generate_little_endian_bytes(struct_name: str, fields: List[Tuple[str, str, 
         if size == 0:
             # 크기를 알 수 없는 경우
             if is_macro_array(field_type):
-                # 매크로 배열인 경우 사용자 입력 크기 사용
-                key = (struct_name, current_field_path)
-                array_size = macro_sizes.get(key, 0)
+                # 매크로 배열인 경우 매크로 이름 기반 크기 사용
+                macro_name = get_macro_name(field_type)
+                array_size = macro_sizes.get(macro_name, 0) if macro_name else 0
                 if array_size > 0:
                     base_type = re.sub(r'\[.*?\]', '', field_type).strip()
                     base_size = TYPE_SIZES.get(base_type, 0)
@@ -908,14 +941,14 @@ def generate_little_endian_bytes(struct_name: str, fields: List[Tuple[str, str, 
                 else:
                     bytes_list.append(f"0x{byte_pattern[i % len(byte_pattern)]:02X}")
             
-            bytes_str = ", ".join(bytes_list)
-            lines.append(f"        {bytes_str}, //{field_type} {field_name};")
+            comment = f"//{field_type} {field_name};"
+            append_bytes_with_wrap(lines, bytes_list, comment=comment)
     
-    lines.append("    }")
+    lines.append("    };")
     return "\n".join(lines)
 
 
-def generate_test_code(structs: List[Dict], header_name: str, macro_sizes: Dict[Tuple[str, str], int]) -> str:
+def generate_test_code(structs: List[Dict], header_name: str, macro_sizes: Dict[str, int]) -> str:
     """테스트 코드 생성"""
     lines = []
     
