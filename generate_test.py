@@ -15,12 +15,9 @@ TYPE_SIZES = {
     'uint8_t': 1,
     'int8_t': 1,
     'uint16_t': 2,
-    'unsigned short': 2,
     'int16_t': 2,
     'uint32_t': 4,
-    'unsigned int': 4,
     'int32_t': 4,
-    'int': 4,
     'uint64_t': 8,
     'int64_t': 8,
     'char': 1,
@@ -838,7 +835,7 @@ def generate_big_endian_bytes(struct_name: str, fields: List[Tuple[str, str, int
             comment = f"//{field_type} {field_name};"
             append_bytes_with_wrap(lines, bytes_list, comment=comment)
     
-    lines.append("    }")
+    lines.append("    };")
     return "\n".join(lines)
 
 
@@ -1031,6 +1028,179 @@ def generate_test_code(structs: List[Dict], header_name: str, macro_sizes: Dict[
     return "\n".join(lines)
 
 
+def _generate_field_checks_for_struct(struct_name: str,
+                                      fields: List[Tuple[str, str, int]],
+                                      structs_dict: Dict[str, List[Tuple[str, str, int]]],
+                                      macro_sizes: Dict[str, int],
+                                      field_path: str = "",
+                                      offset: int = 0) -> Tuple[List[str], int]:
+    """각 필드(및 배열 요소)에 대해 offset/size 기반 비교 코드를 생성"""
+    lines: List[str] = []
+
+    for field_type, field_name, size in fields:
+        current_field_path = f"{field_path}.{field_name}" if field_path else field_name
+
+        if size == 0:
+            # 크기를 알 수 없는 경우 (매크로 배열 또는 중첩 구조체)
+            if is_macro_array(field_type):
+                # 매크로 배열
+                macro_name = get_macro_name(field_type)
+                array_size = macro_sizes.get(macro_name, 0) if macro_name else 0
+                if array_size > 0:
+                    base_type = re.sub(r'\[.*?\]', '', field_type).strip()
+                    base_size = TYPE_SIZES.get(base_type, 0)
+                    nested_fields = structs_dict.get(base_type)
+
+                    if nested_fields:
+                        # 중첩 구조체 배열
+                        for elem_idx in range(array_size):
+                            # 각 요소에 대해 재귀적으로 필드 체크 생성
+                            elem_path = f"{current_field_path}[{elem_idx}]"
+                            nested_lines, offset = _generate_field_checks_for_struct(
+                                struct_name,
+                                nested_fields,
+                                structs_dict,
+                                macro_sizes,
+                                elem_path,
+                                offset,
+                            )
+                            lines.extend(nested_lines)
+                    elif base_size > 0:
+                        # 기본 타입 배열
+                        for elem_idx in range(array_size):
+                            elem_path = f"{current_field_path}[{elem_idx}]"
+                            length = base_size
+                            lines.append(
+                                f"    CheckFieldEqual(\"{elem_path}\", "
+                                f"big_endian_raw_{struct_name}, little_endian_raw_{struct_name}, "
+                                f"{offset}, {length});"
+                            )
+                            offset += length
+                    else:
+                        # 타입 크기를 알 수 없으면 바이트 생성도 하지 않았으므로 offset 변화 없음
+                        continue
+                else:
+                    # 매크로 크기 미입력: 테스트 배열에도 바이트가 생성되지 않으므로 offset 변화 없음
+                    continue
+            else:
+                # 중첩 구조체인지 확인
+                base_type = field_type.strip()
+                nested_fields = structs_dict.get(base_type)
+                if nested_fields:
+                    nested_lines, offset = _generate_field_checks_for_struct(
+                        struct_name,
+                        nested_fields,
+                        structs_dict,
+                        macro_sizes,
+                        current_field_path,
+                        offset,
+                    )
+                    lines.extend(nested_lines)
+                else:
+                    # 알 수 없는 타입: 테스트 배열에도 바이트가 생성되지 않음
+                    continue
+        else:
+            # size는 이 필드 전체의 바이트 수
+            length = size
+            lines.append(
+                f"    CheckFieldEqual(\"{current_field_path}\", "
+                f"big_endian_raw_{struct_name}, little_endian_raw_{struct_name}, "
+                f"{offset}, {length});"
+            )
+            offset += length
+
+    return lines, offset
+
+
+def generate_detailed_test_code(structs: List[Dict], header_name: str, macro_sizes: Dict[str, int]) -> str:
+    """필드 단위로 어느 변수에서 값이 깨지는지 확인하는 상세 테스트 코드 생성"""
+    lines: List[str] = []
+
+    include_name = header_name
+
+    lines.append("#include <gtest/gtest.h>")
+    lines.append("#include <string.h>  // memcmp")
+    lines.append("")
+    lines.append("extern \"C\" {")
+    lines.append(f"#include \"{include_name}\"")
+    lines.append("}")
+    lines.append("")
+
+    # 공통 헬퍼 함수: 필드 단위 비교
+    lines.append("static void CheckFieldEqual(const char* field_name,")
+    lines.append("                            const uint8_t* big,")
+    lines.append("                            const uint8_t* little,")
+    lines.append("                            size_t offset,")
+    lines.append("                            size_t length) {")
+    lines.append("    EXPECT_EQ(0, memcmp(big + offset, little + offset, length))")
+    lines.append("        << \"Field mismatch: \" << field_name")
+    lines.append("        << \", offset=\" << offset")
+    lines.append("        << \", size=\" << length;")
+    lines.append("}")
+    lines.append("")
+
+    structs_dict = {struct['name']: struct['fields'] for struct in structs}
+
+    for struct in structs:
+        struct_name = struct['name']
+        fields = struct['fields']
+
+        if not fields:
+            continue
+
+        test_name = f\"{struct_name}_endian_converter_detail\"
+        test_class_parts = [part.capitalize() for part in struct_name.split('_')]
+        test_class = ''.join(test_class_parts) + \"DetailTest\"
+
+        lines.append(f\"TEST({test_class}, {test_name}) {{\")
+
+        # Big endian / Little endian 배열은 기존과 동일하게 생성
+        big_endian = generate_big_endian_bytes(struct_name, fields, structs_dict, macro_sizes)
+        lines.append(big_endian)
+        lines.append(\"\")
+
+        little_endian = generate_little_endian_bytes(struct_name, fields, structs_dict, macro_sizes)
+        lines.append(little_endian)
+        lines.append(\"\")
+
+        # 크기 검증은 그대로 유지 (실제 sizeof와의 차이도 함께 확인)
+        lines.append(f\"    EXPECT_EQ(sizeof(big_endian_raw_{struct_name}), \")
+        lines.append(f\"              sizeof({struct_name}));\")
+        lines.append(f\"    EXPECT_EQ(sizeof(little_endian_raw_{struct_name}), \")
+        lines.append(f\"              sizeof({struct_name}));\")
+        lines.append(\"\")
+
+        # msgType 설정 및 엔디안 변환 호출
+        if struct_name.endswith('_type'):
+            struct_id_macro = struct_name[:-5] + \"_id\"
+        else:
+            struct_id_macro = struct_name + \"_id\"
+
+        lines.append(f\"    messageHdr_type *pBigEndianMsgHdr = (messageHdr_type *)big_endian_raw_{struct_name};\")
+        lines.append(f\"    messageHdr_type *pLittleEndianMsgHdr = (messageHdr_type *)little_endian_raw_{struct_name};\")
+        lines.append(f\"    pBigEndianMsgHdr ->msgType = {struct_id_macro};\")
+        lines.append(f\"    pLittleEndianMsgHdr->msgType = ntohs({struct_id_macro});\")
+        lines.append(\"\")
+
+        lines.append(f\"    Gcci_EndianH2N(big_endian_raw_{struct_name}, sizeof({struct_name}));\")
+        lines.append(\"\")
+
+        # 필드 단위 비교 코드 생성
+        field_check_lines, _ = _generate_field_checks_for_struct(
+            struct_name,
+            fields,
+            structs_dict,
+            macro_sizes,
+            field_path=\"\",
+            offset=0,
+        )
+        lines.extend(field_check_lines)
+
+        lines.append(\"}\")
+        lines.append(\"\")
+
+    return \"\\n\".join(lines)
+
 def main():
     if len(sys.argv) < 2:
         print("사용법: python3 generate_tests.py <헤더파일> [출력파일]")
@@ -1199,6 +1369,7 @@ def main():
     # 테스트 코드 생성
     header_name = header_path.name
     test_code = generate_test_code(structs, header_name, macro_sizes)
+    detailed_test_code = generate_detailed_test_code(structs, header_name, macro_sizes)
     
     # 출력
     if len(sys.argv) >= 3:
@@ -1206,6 +1377,12 @@ def main():
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(test_code)
         print(f"\n테스트 코드가 생성되었습니다: {output_path}")
+
+        # 상세 필드 비교용 테스트 파일도 함께 생성
+        detail_output_path = output_path.with_name(output_path.stem + "_detail" + output_path.suffix)
+        with open(detail_output_path, 'w', encoding='utf-8') as f:
+            f.write(detailed_test_code)
+        print(f"상세 필드 비교 테스트 코드가 생성되었습니다: {detail_output_path}")
     else:
         print("\n=== 생성된 테스트 코드 ===")
         print(test_code)
