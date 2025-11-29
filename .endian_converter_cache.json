@@ -1,0 +1,15 @@
+{
+  "struct_header_paths": {
+    "device_config_t": "/home/jbok/workspace/endian-converter/external_struct.h",
+    "log_entry_t": "/home/jbok/workspace/endian-converter/external_struct.h"
+  },
+  "excluded_structs": [
+    "memory_info_t"
+  ],
+  "macro_sizes": {
+    "MAX_DATA_BUFFER_SIZE": 32,
+    "MAX_SENSOR_COUNT": 16,
+    "MAX_NETWORK_ADDRESSES": 8,
+    "MAX_HISTORY_ENTRIES": 64
+  }
+}
